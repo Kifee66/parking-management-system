@@ -1,4 +1,4 @@
-/*This is the schema used to create the Database tables in supabase*/
+/*This is the schema I used to create the Database tables in supabase*/
 
 CREATE TABLE IF NOT EXISTS vehicles (
   vehicle_id SERIAL PRIMARY KEY,

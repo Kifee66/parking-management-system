@@ -51,6 +51,10 @@ function App() {
           vehicleId: slot.vehicle_id,
         }))
 
+        const occupiedVehicleIds = new Set(
+          nextSlots.filter((slot) => slot.status === 'OCCUPIED' && slot.vehicleId).map((slot) => slot.vehicleId),
+        )
+
         const nextVehicles = (vehiclesResponse.data ?? []).map((vehicle) => ({
           id: vehicle.vehicle_id,
           registrationNo: vehicle.registration_no,
@@ -59,7 +63,7 @@ function App() {
           phoneNumber: vehicle.phone_number || 'Not provided',
           entryTime: vehicle.created_at,
           slotNumber: nextSlots.find((slot) => slot.vehicleId === vehicle.vehicle_id)?.slotNumber || 'N/A',
-          status: 'Parked',
+          status: occupiedVehicleIds.has(vehicle.vehicle_id) ? 'Parked' : 'Exited',
           paymentStatus: 'PENDING',
         }))
 
@@ -101,26 +105,66 @@ function App() {
     [transactions],
   )
 
-  const handleVehicleEntry = (formData) => {
+  const handleVehicleEntry = async (formData) => {
     try {
       setSubmitting(true)
+
+      if (!supabase) {
+        setNotice('Supabase is not configured. Add your environment variables first.')
+        return
+      }
+
       const { vehicle, slot } = registerVehicle(formData, slots, vehicles)
+
+      const { data: newVehicle, error: vehicleInsertError } = await supabase
+        .from('vehicles')
+        .insert({
+          registration_no: vehicle.registrationNo,
+          vehicle_type: vehicle.vehicleType,
+          owner_name: vehicle.ownerName,
+          phone_number: vehicle.phoneNumber,
+        })
+        .select()
+        .single()
+
+      if (vehicleInsertError) {
+        throw vehicleInsertError
+      }
+
+      const { error: slotUpdateError } = await supabase
+        .from('parking_slots')
+        .update({
+          status: 'OCCUPIED',
+          vehicle_id: newVehicle.vehicle_id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('slot_number', slot.slotNumber)
+
+      if (slotUpdateError) {
+        throw slotUpdateError
+      }
+
+      const savedVehicle = {
+        ...vehicle,
+        id: newVehicle.vehicle_id,
+        entryTime: newVehicle.created_at || vehicle.entryTime,
+      }
 
       setSlots((currentSlots) =>
         currentSlots.map((item) =>
           item.slotNumber === slot.slotNumber
-            ? { ...item, status: 'OCCUPIED', vehicleId: vehicle.id }
+            ? { ...item, status: 'OCCUPIED', vehicleId: savedVehicle.id }
             : item,
         ),
       )
 
-      setVehicles((currentVehicles) => [...currentVehicles, vehicle])
-      setSelectedSlot({ ...slot, status: 'OCCUPIED' })
-      setNotice(`Vehicle ${vehicle.registrationNo} assigned to slot ${vehicle.slotNumber}.`)
+      setVehicles((currentVehicles) => [...currentVehicles, savedVehicle])
+      setSelectedSlot({ ...slot, status: 'OCCUPIED', vehicleId: savedVehicle.id })
+      setNotice(`Vehicle ${savedVehicle.registrationNo} assigned to slot ${savedVehicle.slotNumber}.`)
       setBarrierState('CLOSED')
       setPaymentStatus('PENDING')
     } catch (error) {
-      setNotice(error.message)
+      setNotice(error.message || 'Unable to register vehicle in the database.')
     } finally {
       setSubmitting(false)
     }
@@ -144,7 +188,7 @@ function App() {
     }
   }, [searchTerm, slots, vehicles])
 
-  const handleVehicleExit = () => {
+  const handleVehicleExit = async () => {
     if (!searchTerm.trim()) {
       setNotice('Enter a registration number first.')
       return
@@ -152,10 +196,54 @@ function App() {
 
     try {
       setProcessingExit(true)
+
+      if (!supabase) {
+        setNotice('Supabase is not configured. Add your environment variables first.')
+        return
+      }
+
       const foundVehicle = findVehicleForExit()
       if (!foundVehicle) {
         setNotice('Vehicle not found or already exited.')
         return
+      }
+
+      const { data: slotRecord, error: slotLookupError } = await supabase
+        .from('parking_slots')
+        .select('*')
+        .eq('slot_number', foundVehicle.slotNumber)
+        .single()
+
+      if (slotLookupError) {
+        throw slotLookupError
+      }
+
+      const { error: slotUpdateError } = await supabase
+        .from('parking_slots')
+        .update({
+          status: 'AVAILABLE',
+          vehicle_id: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('slot_number', foundVehicle.slotNumber)
+
+      if (slotUpdateError) {
+        throw slotUpdateError
+      }
+
+      const { error: transactionInsertError } = await supabase.from('parking_transactions').insert({
+        vehicle_id: foundVehicle.id,
+        slot_id: slotRecord.slot_id,
+        entry_time: foundVehicle.entryTime,
+        exit_time: new Date().toISOString(),
+        duration_minutes: foundVehicle.durationMinutes,
+        amount_due: foundVehicle.amountDue,
+        payment_status: 'PAID',
+        payment_time: new Date().toISOString(),
+      })
+
+      if (transactionInsertError) {
+        throw transactionInsertError
       }
 
       setPaymentStatus('PAID')
@@ -204,7 +292,7 @@ function App() {
         setPaymentStatus('PAID')
       }, 700)
     } catch (error) {
-      setNotice(error.message)
+      setNotice(error.message || 'Unable to complete vehicle exit.')
       setBarrierState('PAYMENT REQUIRED')
       setPaymentStatus('FAILED')
     } finally {
