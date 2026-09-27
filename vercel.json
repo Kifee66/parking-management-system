@@ -1,0 +1,4 @@
+{
+  "buildCommand": "cd THE-PARKING-SYSTEM-UI && npm install && npm run build",
+  "outputDirectory": "THE-PARKING-SYSTEM-UI/dist"
+}
